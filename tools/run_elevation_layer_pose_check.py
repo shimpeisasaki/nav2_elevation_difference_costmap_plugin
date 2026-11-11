@@ -43,6 +43,7 @@ def make_params_file() -> Path:
               elevation_layer:
                 plugin: "nav2_elevation_difference_costmap_plugin::ElevationLayer"
                 enabled: true
+                topic: /surestar_points
               always_send_full_costmap: true
         """
     ).strip()

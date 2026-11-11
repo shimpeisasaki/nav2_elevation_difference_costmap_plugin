@@ -103,19 +103,15 @@ class RoiFilterNode(Node):
 
         # structured array → 通常の(N,3)配列へ変換
         points = np.stack(
-          (
-                 points["x"],
-                 points["y"],
-                 points["z"]
-          ),
-        axis=1
+            (points["x"], points["y"], points["z"]),
+            axis=1
         )
 
         if points.shape[0] == 0:
             return
 
         print(points.shape)
-        #print(points.dtype)
+        # print(points.dtype)
 
         if len(points) == 0:
             return

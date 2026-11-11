@@ -29,488 +29,150 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "nav2_elevation_difference_costmap_plugin/elevation_layer.hpp"
-
+#include "nav2_elevation_difference_costmap_plugin/point_cloud.hpp"
+#include <pluginlib/class_list_macros.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <algorithm>
 #include <chrono>
-#include <mutex>
-#include <stdexcept>
-
-#include "pluginlib/class_list_macros.hpp"
-#include "sensor_msgs/point_cloud2_iterator.hpp"
 
 namespace nav2_elevation_difference_costmap_plugin
 {
-
-namespace
-{
-
-struct TransformMatrix
-{
-  explicit TransformMatrix(
-    const geometry_msgs::msg::Transform & transform)
-  : translation(transform.translation)
-  {
-    const auto & q = transform.rotation;
-
-    r00 = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-    r01 = 2.0 * (q.x * q.y - q.w * q.z);
-    r02 = 2.0 * (q.x * q.z + q.w * q.y);
-
-    r10 = 2.0 * (q.x * q.y + q.w * q.z);
-    r11 = 1.0 - 2.0 * (q.x * q.x + q.z * q.z);
-    r12 = 2.0 * (q.y * q.z - q.w * q.x);
-
-    r20 = 2.0 * (q.x * q.z - q.w * q.y);
-    r21 = 2.0 * (q.y * q.z + q.w * q.x);
-    r22 = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
-  }
-
-  geometry_msgs::msg::Vector3 translation;
-
-  double r00;
-  double r01;
-  double r02;
-
-  double r10;
-  double r11;
-  double r12;
-
-  double r20;
-  double r21;
-  double r22;
-};
-
-}  // namespace
-
 void ElevationLayer::onInitialize()
 {
   auto node = node_.lock();
-
-  if (!node) {
-    throw std::runtime_error("Failed to lock node");
+  if (!node) {throw std::runtime_error("ElevationLayer node expired");}
+  const auto parameter = [&](const std::string & key, auto fallback) {
+      declareParameter(key, rclcpp::ParameterValue(fallback));
+      return node->get_parameter(name_ + "." + key).get_value<decltype(fallback)>();
+    };
+  enabled_ = parameter("enabled", true);
+  auto topic = parameter("topic", std::string("/livox/lidar"));
+  evidence_frame_ = parameter("evidence_frame", std::string("odom"));
+  max_age_ = parameter("max_cloud_age", .8);
+  TerrainOptions options;
+  options.resolution = parameter("evidence_resolution", .1);
+  options.step_height = parameter("step_height", .03);
+  options.max_spread = parameter("max_height_spread", .03);
+  options.max_slope_deg = parameter("max_slope_deg", 7.);
+  options.safe_lifetime = parameter("safe_lifetime", 30.);
+  const int64_t min_points = parameter("min_points", int64_t(6));
+  const int64_t frames = parameter("accumulation_frames", int64_t(5));
+  if (min_points < 3 || min_points > 10000 || frames < 1 || frames > 20 ||
+    !std::isfinite(max_age_) || max_age_ <= 0 || max_age_ > 2. || evidence_frame_.empty() ||
+    topic.empty())
+  {
+    throw std::invalid_argument("Invalid elevation layer parameters");
   }
-
-  declareParameter("enabled", rclcpp::ParameterValue(true));
-
-  declareParameter(
-    "topic",
-    rclcpp::ParameterValue("/livox/lidar"));
-
-  declareParameter(
-    "beam_filter.enabled",
-    rclcpp::ParameterValue(true));
-
-  declareParameter(
-    "beam_filter.negative",
-    rclcpp::ParameterValue(true));
-
-  declareParameter(
-    "beam_filter.xmin",
-    rclcpp::ParameterValue(-0.70));
-
-  declareParameter(
-    "beam_filter.xmax",
-    rclcpp::ParameterValue(0.70));
-
-  declareParameter(
-    "beam_filter.ymin",
-    rclcpp::ParameterValue(-0.45));
-
-  declareParameter(
-    "beam_filter.ymax",
-    rclcpp::ParameterValue(1.00));
-
-  declareParameter(
-    "beam_filter.zmin",
-    rclcpp::ParameterValue(-2.0));
-
-  declareParameter(
-    "beam_filter.zmax",
-    rclcpp::ParameterValue(2.0));
-
-  node->get_parameter(
-    name_ + ".enabled",
-    enabled_);
-
-  std::string topic;
-
-  node->get_parameter(
-    name_ + ".topic",
-    topic);
-
-  node->get_parameter(
-    name_ + ".beam_filter.enabled",
-    beam_filter_.enabled);
-
-  node->get_parameter(
-    name_ + ".beam_filter.negative",
-    beam_filter_.negative);
-
-  node->get_parameter(
-    name_ + ".beam_filter.xmin",
-    beam_filter_.xmin);
-
-  node->get_parameter(
-    name_ + ".beam_filter.xmax",
-    beam_filter_.xmax);
-
-  node->get_parameter(
-    name_ + ".beam_filter.ymin",
-    beam_filter_.ymin);
-
-  node->get_parameter(
-    name_ + ".beam_filter.ymax",
-    beam_filter_.ymax);
-
-  node->get_parameter(
-    name_ + ".beam_filter.zmin",
-    beam_filter_.zmin);
-
-  node->get_parameter(
-    name_ + ".beam_filter.zmax",
-    beam_filter_.zmax);
-
-  tf_buffer_ =
-    std::make_shared<tf2_ros::Buffer>(
-      node->get_clock());
-
-  tf_listener_ =
-    std::make_shared<tf2_ros::TransformListener>(
-      *tf_buffer_);
-
-  points_sub_ =
-    node->create_subscription<sensor_msgs::msg::PointCloud2>(
-      topic,
-      rclcpp::SensorDataQoS(),
-      std::bind(
-        &ElevationLayer::pointCloudCallback,
-        this,
-        std::placeholders::_1));
-
+  options.min_points = unsigned(min_points); options.accumulation_frames = unsigned(frames);
+  model_ = std::make_unique<TerrainModel>(options);
+  beam_enabled_ = parameter("beam_filter.enabled", false);
+  beam_negative_ = parameter("beam_filter.negative", true);
+  const std::array<std::string, 6> keys{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
+  const std::array<double, 6> defaults{-.70, .70, -.45, 1., -2., 2.};
+  for (size_t i = 0; i < 6; ++i) {
+    beam_[i] = parameter("beam_filter." + keys[i], defaults[i]);
+  }
+  for (size_t i = 0; i < 6; i += 2) {
+    if (!std::isfinite(beam_[i]) || !std::isfinite(beam_[i + 1]) || beam_[i] >= beam_[i + 1]) {
+      throw std::invalid_argument("Invalid beam filter box");
+    }
+  }
+  default_value_ = nav2_costmap_2d::NO_INFORMATION;
   matchSize();
-
-  current_ = true;
+  subscription_ = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+    topic, rclcpp::SensorDataQoS(),
+    [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+      std::lock_guard<std::mutex> lock(cloud_mutex_);
+      cloud_ = msg; received_ = std::chrono::steady_clock::now();
+    });
+  current_ = false;
 }
-
-void ElevationLayer::matchSize()
-{
-  auto * master =
-    layered_costmap_->getCostmap();
-
-  const size_t cell_count =
-    static_cast<size_t>(
-      master->getSizeInCellsX()) *
-    master->getSizeInCellsY();
-
-  cells_.assign(
-    cell_count,
-    CellInfo{});
-
-  touched_cells_.clear();
-
-  const size_t reserve_size =
-    std::min(
-      cell_count,
-      static_cast<size_t>(20000));
-
-  touched_cells_.reserve(reserve_size);
-}
-
-void ElevationLayer::pointCloudCallback(
-  const sensor_msgs::msg::PointCloud2::SharedPtr msg)
-{
-  std::lock_guard<std::mutex> lock(
-    cloud_mutex_);
-
-  latest_cloud_ = msg;
-}
-
 void ElevationLayer::updateBounds(
-  double /*robot_x*/,
-  double /*robot_y*/,
-  double /*robot_yaw*/,
-  double * min_x,
-  double * min_y,
-  double * max_x,
-  double * max_y)
+  double, double, double, double * xmin, double * ymin,
+  double * xmax, double * ymax)
 {
-  if (!enabled_) {
-    return;
-  }
-
-  const auto * master = layered_costmap_->getCostmap();
-
-  if (master->getSizeInCellsX() == 0 || master->getSizeInCellsY() == 0) {
-    return;
-  }
-
-  // updateCosts writes directly into the master grid. Request its full extent
-  // so that old costs are reset and all written cells are updated/published.
-  // Read the geometry each cycle to follow resizing and rolling origins.
-  const double origin_x = master->getOriginX();
-  const double origin_y = master->getOriginY();
-  const double end_x =
-    origin_x + master->getSizeInCellsX() * master->getResolution();
-  const double end_y =
-    origin_y + master->getSizeInCellsY() * master->getResolution();
-
-  // Like CostmapLayer::touch(), only expand bounds requested by other layers.
-  *min_x = std::min(*min_x, origin_x);
-  *min_y = std::min(*min_y, origin_y);
-  *max_x = std::max(*max_x, end_x);
-  *max_y = std::max(*max_y, end_y);
+  if (!enabled_) {return;}
+  auto * master = layered_costmap_->getCostmap();
+  *xmin = std::min(*xmin, master->getOriginX()); *ymin = std::min(*ymin, master->getOriginY());
+  *xmax =
+    std::max(*xmax, master->getOriginX() + master->getSizeInCellsX() * master->getResolution());
+  *ymax =
+    std::max(*ymax, master->getOriginY() + master->getSizeInCellsY() * master->getResolution());
 }
-
 void ElevationLayer::updateCosts(
-  nav2_costmap_2d::Costmap2D & master_grid,
-  int /*min_i*/,
-  int /*min_j*/,
-  int /*max_i*/,
-  int /*max_j*/)
+  nav2_costmap_2d::Costmap2D & master, int min_i, int min_j,
+  int max_i, int max_j)
 {
-  if (!enabled_) {
-    return;
-  }
-
-  const auto start_time =
-    std::chrono::steady_clock::now();
-
-  sensor_msgs::msg::PointCloud2::SharedPtr cloud;
-
+  if (!enabled_) {current_ = true; return;}
+  auto node = node_.lock(); if (!node) {return;}
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud;
+  double received_age;
   {
-    std::lock_guard<std::mutex> lock(
-      cloud_mutex_);
-
-    cloud = latest_cloud_;
+    std::lock_guard<std::mutex> lock(cloud_mutex_);
+    cloud = cloud_;
+    received_age =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - received_).count();
   }
-
-  if (!cloud) {
-    return;
-  }
-
-  geometry_msgs::msg::TransformStamped tf;
-
+  std::lock_guard<std::mutex> model_lock(model_mutex_);
+  current_ = false;
+  if (!cloud || cloud->header.frame_id.empty()) {return;}
+  const rclcpp::Time stamp(cloud->header.stamp, node->get_clock()->get_clock_type());
+  const double age = (node->now() - stamp).seconds();
+  if (stamp.nanoseconds() <= 0 || age < -.1 || age > max_age_ || received_age > max_age_) {return;}
   try {
-    tf = tf_buffer_->lookupTransform(
-      layered_costmap_->getGlobalFrameID(),
-      cloud->header.frame_id,
-      tf2::TimePointZero);
-  } catch (const tf2::TransformException & ex) {
-    RCLCPP_WARN(
-      logger_,
-      "Failed to transform point cloud: %s",
-      ex.what());
-
-    return;
-  }
-
-  const size_t cell_count =
-    static_cast<size_t>(
-      master_grid.getSizeInCellsX()) *
-    master_grid.getSizeInCellsY();
-
-  if (cells_.size() != cell_count) {
-    cells_.assign(
-      cell_count,
-      CellInfo{});
-
-    touched_cells_.clear();
-
-    const size_t point_count =
-      static_cast<size_t>(
-        cloud->width) *
-      cloud->height;
-
-    touched_cells_.reserve(
-      std::min(
-        cell_count,
-        point_count));
-  }
-
-  const TransformMatrix transform(
-    tf.transform);
-
-  sensor_msgs::PointCloud2ConstIterator<float> iter_x(
-    *cloud,
-    "x");
-
-  sensor_msgs::PointCloud2ConstIterator<float> iter_y(
-    *cloud,
-    "y");
-
-  sensor_msgs::PointCloud2ConstIterator<float> iter_z(
-    *cloud,
-    "z");
-
-  for (;
-    iter_x != iter_x.end();
-    ++iter_x,
-    ++iter_y,
-    ++iter_z)
-  {
-    const float source_x = *iter_x;
-    const float source_y = *iter_y;
-    const float source_z = *iter_z;
-
-    if (beam_filter_.enabled) {
-      const bool inside =
-        source_x >= beam_filter_.xmin &&
-        source_x <= beam_filter_.xmax &&
-        source_y >= beam_filter_.ymin &&
-        source_y <= beam_filter_.ymax &&
-        source_z >= beam_filter_.zmin &&
-        source_z <= beam_filter_.zmax;
-
-      if (beam_filter_.negative) {
-        if (inside) {
-          continue;
-        }
-      } else {
-        if (!inside) {
-          continue;
-        }
+    if (stamp.seconds() < model_->lastStamp()) {return;}
+    if (stamp.seconds() > model_->lastStamp()) {
+      tf2::Transform transform;
+      tf2::fromMsg(
+        tf_->lookupTransform(
+          evidence_frame_, cloud->header.frame_id,
+          stamp).transform, transform);
+      std::vector<Point> points;
+      for (const auto & p:readPoints(*cloud)) {
+        const bool inside = p.x >= beam_[0] && p.x <= beam_[1] && p.y >= beam_[2] &&
+          p.y <= beam_[3] &&
+          p.z >= beam_[4] && p.z <= beam_[5];
+        if (beam_enabled_ && (beam_negative_ ? inside : !inside)) {continue;}
+        auto q = transform * tf2::Vector3(p.x, p.y, p.z); points.push_back({q.x(), q.y(), q.z()});
+      }
+      if (!model_->observe(points, stamp.seconds())) {return;}
+    }
+    // Reprojection may follow SLAM corrections; observations stay fixed in odom.
+    tf2::Transform transform;
+    tf2::fromMsg(
+      tf_->lookupTransform(
+        layered_costmap_->getGlobalFrameID(), evidence_frame_, stamp).transform, transform);
+    const auto & b = transform.getBasis(); const auto & t = transform.getOrigin();
+    GridProjection projection({b[0][0], b[0][1], t.x(), b[1][0], b[1][1], t.y()});
+    resizeMap(
+      master.getSizeInCellsX(), master.getSizeInCellsY(),
+      master.getResolution(), master.getOriginX(), master.getOriginY());
+    for (int y = std::max(0, min_j); y < std::min(int(getSizeInCellsY()), max_j); ++y) {
+      for (int x = std::max(0, min_i); x < std::min(int(getSizeInCellsX()), max_i); ++x) {
+        const double wx = getOriginX() + x * getResolution(),
+          wy = getOriginY() + y * getResolution();
+        setCost(
+          x, y,
+          model_->area(
+            projection.sourceQuad(wx, wy, getResolution()),
+            node->now().seconds()).cost);
       }
     }
-
-    const double x =
-      transform.r00 * source_x +
-      transform.r01 * source_y +
-      transform.r02 * source_z +
-      transform.translation.x;
-
-    const double y =
-      transform.r10 * source_x +
-      transform.r11 * source_y +
-      transform.r12 * source_z +
-      transform.translation.y;
-
-    const float z =
-      static_cast<float>(
-        transform.r20 * source_x +
-        transform.r21 * source_y +
-        transform.r22 * source_z +
-        transform.translation.z);
-
-    unsigned int mx;
-    unsigned int my;
-
-    if (!master_grid.worldToMap(
-        x,
-        y,
-        mx,
-        my))
-    {
-      continue;
-    }
-
-    const unsigned int index =
-      master_grid.getIndex(
-        mx,
-        my);
-
-    auto & cell =
-      cells_[index];
-
-    if (!cell.initialized) {
-      cell.initialized = true;
-      cell.z_min = z;
-      cell.z_max = z;
-      cell.point_count = 1;
-
-      touched_cells_.push_back(index);
-    } else {
-      cell.z_min =
-        std::min(
-          cell.z_min,
-          z);
-
-      cell.z_max =
-        std::max(
-          cell.z_max,
-          z);
-
-      ++cell.point_count;
-    }
-  }
-
-  unsigned char * costmap =
-    master_grid.getCharMap();
-
-  for (const unsigned int index : touched_cells_) {
-    auto & cell =
-      cells_[index];
-
-    const float difference =
-      cell.z_max - cell.z_min;
-
-    if (difference < kMinElevationDifference) {
-      costmap[index] = 0;
-    } else if (
-      difference >= kMaxElevationDifference)
-    {
-      costmap[index] = kMaxCost;
-    } else {
-      costmap[index] =
-        static_cast<unsigned char>(
-          (difference -
-           kMinElevationDifference) *
-          kMaxCost /
-          (kMaxElevationDifference -
-           kMinElevationDifference));
-    }
-
-    cell.initialized = false;
-    cell.point_count = 0;
-  }
-
-  touched_cells_.clear();
-
-  const auto elapsed =
-    std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() -
-      start_time);
-
-  auto node = node_.lock();
-
-  if (node) {
-    // RCLCPP_INFO_THROTTLE(
-    //   logger_,
-    //   *node->get_clock(),
-    //   1000,
-    //   "updateCosts took %.3f ms",
-    //   elapsed.count());
-
-    RCLCPP_INFO(
+    updateWithMax(master, min_i, min_j, max_i, max_j);
+    current_ = true;
+  } catch (const std::exception & error) {
+    RCLCPP_WARN_THROTTLE(
       logger_,
-      "updateCosts took %.3f ms",
-      elapsed.count());
+      *node->get_clock(), 2000, "Terrain update rejected: %s", error.what());
   }
 }
-
 void ElevationLayer::reset()
 {
-  std::lock_guard<std::mutex> lock(
-    cloud_mutex_);
-
-  latest_cloud_.reset();
-
-  touched_cells_.clear();
-
-  for (auto & cell : cells_) {
-    cell.initialized = false;
-    cell.point_count = 0;
-  }
-
-  current_ = true;
+  std::lock_guard<std::mutex> lock(cloud_mutex_);
+  std::lock_guard<std::mutex> model_lock(model_mutex_);
+  cloud_.reset(); model_->reset(); resetMaps(); current_ = false;
 }
-
-bool ElevationLayer::isClearable()
-{
-  return false;
 }
-
-}  // namespace nav2_elevation_difference_costmap_plugin
-
 PLUGINLIB_EXPORT_CLASS(
   nav2_elevation_difference_costmap_plugin::ElevationLayer,
   nav2_costmap_2d::Layer)

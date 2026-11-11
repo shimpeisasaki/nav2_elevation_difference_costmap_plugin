@@ -15,7 +15,7 @@ TARGET_FRAMES = 10
 
 
 class SaveElevationFrames(Node):
-    """指定したフレーム数のセル情報をCSVへ保存するノード。"""
+    """Save cell information for a configured number of frames to CSV."""
 
     def __init__(self) -> None:
         super().__init__("save_elevation_frames")
@@ -66,8 +66,7 @@ class SaveElevationFrames(Node):
         )
 
     def open_csv(self) -> None:
-        """CSVを最初の有効なフレーム受信時に開く。"""
-
+        """Open the CSV file on the first valid frame."""
         self.output_path.parent.mkdir(
             parents=True,
             exist_ok=True,

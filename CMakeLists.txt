@@ -30,12 +30,21 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+add_library(elevation_terrain_model SHARED src/terrain_model.cpp)
+target_compile_features(elevation_terrain_model PUBLIC cxx_std_17)
+target_include_directories(elevation_terrain_model PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
 
 add_library(
   nav2_elevation_difference_costmap_plugin_core
   SHARED
   src/elevation_layer.cpp
 )
+target_compile_features(nav2_elevation_difference_costmap_plugin_core PUBLIC cxx_std_17)
+target_link_libraries(nav2_elevation_difference_costmap_plugin_core elevation_terrain_model)
 
 target_include_directories(
   nav2_elevation_difference_costmap_plugin_core
@@ -52,6 +61,8 @@ ament_target_dependencies(
   tf2_ros
   tf2_sensor_msgs
   std_msgs
+  tf2_geometry_msgs
+  rclcpp
 )
 
 pluginlib_export_plugin_description_file(
@@ -60,9 +71,23 @@ pluginlib_export_plugin_description_file(
 )
 
 install(
-  TARGETS nav2_elevation_difference_costmap_plugin_core
+  TARGETS nav2_elevation_difference_costmap_plugin_core elevation_terrain_model
   DESTINATION lib
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_terrain_model test/test_terrain_model.cpp)
+  target_link_libraries(test_terrain_model elevation_terrain_model)
+  ament_target_dependencies(test_terrain_model sensor_msgs)
+  ament_add_gtest(test_elevation_layer test/test_elevation_layer.cpp)
+  target_link_libraries(test_elevation_layer nav2_elevation_difference_costmap_plugin_core)
+  ament_target_dependencies(test_elevation_layer nav2_costmap_2d rclcpp sensor_msgs tf2_ros)
+  set_tests_properties(test_elevation_layer PROPERTIES ENVIRONMENT "ROS_DOMAIN_ID=221;ROS_LOCALHOST_ONLY=1")
+endif()
+ament_export_include_directories(include)
+ament_export_libraries(elevation_terrain_model)
+ament_export_dependencies(nav2_costmap_2d rclcpp sensor_msgs tf2 tf2_ros)
 
 install(
   FILES elevation_layer.xml
@@ -73,5 +98,6 @@ install(
   DIRECTORY include/
   DESTINATION include
 )
+install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 
 ament_package()

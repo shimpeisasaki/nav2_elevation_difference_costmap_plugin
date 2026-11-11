@@ -2,16 +2,23 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>nav2_elevation_difference_costmap_plugin</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <version>0.1.0</version>
+  <description>Sensor-independent terrain height, grade and step evaluation for Nav2.</description>
   <maintainer email="shuma.suzuki.2021@outlook.jp">ros</maintainer>
-  <license>TODO: License declaration</license>
+  <license>BSD-3-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>pluginlib</depend>
   <depend>nav2_costmap_2d</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_sensor_msgs</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
@@ -19,7 +26,6 @@
   <export>
     <build_type>ament_cmake</build_type>
 
-    <costmap_2d plugin="${prefix}/gradient_layer.xml"/>
 
   </export>
 </package>
