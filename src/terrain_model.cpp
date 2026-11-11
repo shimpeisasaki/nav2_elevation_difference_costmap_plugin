@@ -7,6 +7,28 @@
 
 namespace nav2_elevation_difference_costmap_plugin
 {
+std::optional<HeightStatistics> heightStatistics(std::vector<Point> points, unsigned min_points)
+{
+  points.erase(
+    std::remove_if(
+      points.begin(), points.end(), [](const Point & p) {
+        return !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z);
+      }), points.end());
+  const size_t n = points.size();
+  if (min_points < 3 || n < min_points) {return std::nullopt;}
+  std::sort(
+    points.begin(), points.end(), [](const Point & a, const Point & b) {
+      return a.z < b.z;
+    });
+  const size_t lo = size_t(std::ceil(.1 * n)) - 1, hi = size_t(std::ceil(.9 * n)) - 1;
+  Point center{0, 0, 0};
+  for (size_t i = lo; i <= hi; ++i) {
+    center.x += points[i].x; center.y += points[i].y; center.z += points[i].z;
+  }
+  const double count = hi - lo + 1;
+  return HeightStatistics{{center.x / count, center.y / count, center.z / count},
+    points[lo].z, points[n / 2].z, points[hi].z, n};
+}
 GridProjection::GridProjection(const std::array<double, 6> & t)
 {
   const double det = t[0] * t[4] - t[1] * t[3];
@@ -56,6 +78,20 @@ bool plane(const std::vector<Surface> & rows, Plane & out)
   out.c = z - out.a * x - out.b * y;
   return true;
 }
+bool surfacePlane(const std::vector<Surface> & rows, double max_residual, Plane & out)
+{
+  if (!plane(rows, out)) {return false;}
+  std::vector<Surface> inliers;
+  for (const auto & p : rows) {
+    if (std::abs(p.z - out.z(p.x, p.y)) <= max_residual) {inliers.push_back(p);}
+  }
+  return inliers.size() == rows.size() || plane(inliers, out);
+}
+bool retainable(const TerrainCell & cell)
+{
+  return (cell.cost == 0 && cell.reason == 20) ||
+         (cell.cost == 254 && (cell.reason == 40 || cell.reason == 50 || cell.reason == 60));
+}
 bool overlap(const std::array<std::array<double, 2>, 4> & q, double x, double y, double r)
 {
   for (int axis = 0; axis < 6; ++axis) {
@@ -87,7 +123,7 @@ TerrainModel::TerrainModel(TerrainOptions options)
     options.min_points < 3 || options.min_points > 10000 || options.accumulation_frames < 1 ||
     options.accumulation_frames > 20) {throw std::invalid_argument("Invalid terrain options");}
 }
-void TerrainModel::reset() {frames_.clear(); cells_.clear(); last_stamp_ = -1.;}
+void TerrainModel::reset() {frames_.clear(); cells_.clear(); retained_.clear(); last_stamp_ = -1.;}
 bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
 {
   if (!std::isfinite(stamp) || stamp <= last_stamp_ || stamp < 0 || input.size() > 1000000) {
@@ -116,23 +152,11 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
   }
   Surfaces surfaces;
   for (auto & item:buckets) {
-    auto & b = item.second; const size_t n = b.points.size();
-    if (n < options_.min_points) {continue;}
-    std::sort(
-      b.points.begin(), b.points.end(), [](const Point & a, const Point & b) {
-        return a.z < b.z;
-      });
-    // Nearest ranks keep a lone outlier out of a sufficiently sampled surface.
-    const size_t lo = size_t(std::ceil(.1 * n)) - 1, hi = size_t(std::ceil(.9 * n)) - 1;
-    // Fit planes at measured XYZ centroids. Attaching median Z to an unrelated
-    // cell center/mean XY biases grades for Horizon's uneven scan distribution.
-    Point center{0, 0, 0};
-    for (size_t i = lo; i <= hi; ++i) {
-      center.x += b.points[i].x; center.y += b.points[i].y; center.z += b.points[i].z;
-    }
-    const double count = hi - lo + 1;
-    surfaces[item.first] = {center.x / count, center.y / count, center.z / count,
-      b.points[hi].z - b.points[lo].z, unsigned(n)};
+    const auto stats = heightStatistics(std::move(item.second.points), options_.min_points);
+    if (!stats) {continue;}
+    // XYZ must come from the same retained height interval, not the cell center.
+    surfaces[item.first] = {stats->centroid.x, stats->centroid.y, stats->centroid.z,
+      stats->upper - stats->lower, unsigned(stats->count)};
   }
   const auto neighborhood = [&](Key key, int axis, int side) {
       std::vector<Surface> rows;
@@ -158,8 +182,20 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
     TerrainCell cell{255, 10, stamp};
     if (s.spread >= options_.max_spread - 1e-8) {cell = {254, 30, stamp};} else {
       Plane fitted;
-      if (plane(neighborhood(key, -1, 0), fitted)) {
-        if (std::hypot(
+      auto neighbors = neighborhood(key, -1, 0);
+      neighbors.erase(
+        std::remove_if(
+          neighbors.begin(), neighbors.end(), [&s](const Surface & p) {
+            return p.x == s.x && p.y == s.y;
+          }), neighbors.end());
+      // When enough surrounding cells exist, the tested low obstacle must not
+      // pull its own reference ground plane upward and hide a threshold step.
+      if (neighbors.size() < 6) {neighbors = neighborhood(key, -1, 0);}
+      if (surfacePlane(neighbors, options_.max_spread, fitted)) {
+        const double residual = s.z - fitted.z(s.x, s.y);
+        if (std::abs(residual) >= options_.step_height - 1e-8) {
+          cell = {254, uint8_t(residual > 0 ? 40 : 50), stamp};
+        } else if (std::hypot(
             fitted.a,
             fitted.b) > std::tan(options_.max_slope_deg * std::acos(-1.) / 180.) + 1e-8)
         {
@@ -175,7 +211,10 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
     for (int axis = 0; axis < 2; ++axis) {
       Key neighbor{key.x + (axis == 0), key.y + (axis == 1)};
       auto other = surfaces.find(neighbor);
-      if (other == surfaces.end() || (!observed.count(key) && !observed.count(neighbor))) {
+      if (other == surfaces.end() || (!observed.count(key) && !observed.count(neighbor)) ||
+        item.second.spread >= options_.max_spread - 1e-8 ||
+        other->second.spread >= options_.max_spread - 1e-8)
+      {
         continue;
       }
       double dz = other->second.z - item.second.z;
@@ -192,32 +231,44 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
     }
   }
   for (auto it = cells_.begin(); it != cells_.end(); ) {
-    if (it->second.cost == 0 && stamp - it->second.stamp > options_.safe_lifetime) {
+    if ((it->second.cost == 0 || it->second.reason == 30) &&
+      stamp - it->second.stamp > options_.safe_lifetime)
+    {
       it = cells_.erase(it);
     } else {++it;}
   }
   size_t additions = 0;
+  size_t retained_additions = 0;
   for (const auto & item:evaluated) {
     additions += item.second.cost != 255 && !cells_.count(item.first);
+    retained_additions += options_.retain_global_evidence && retainable(item.second) &&
+      !retained_.count(item.first);
   }
-  if (cells_.size() + additions > 250000) {
+  if (cells_.size() + additions > 250000 || retained_.size() + retained_additions > 250000) {
     throw std::length_error("Terrain evidence limit; explicit reset required");
   }
   // Insufficient observations cannot clear a previously measured hazard.
   for (const auto & item:evaluated) {
     if (item.second.cost != 255) {cells_[item.first] = item.second;}
+    if (options_.retain_global_evidence && retainable(item.second)) {
+      retained_[item.first] = item.second;
+    }
   }
   last_stamp_ = stamp;
   return true;
 }
-TerrainCell TerrainModel::at(Key key, double now) const
+TerrainCell TerrainModel::at(Key key, double now, EvidenceView view) const
 {
-  auto it = cells_.find(key);
-  if (it == cells_.end() ||
-    (it->second.cost == 0 && now - it->second.stamp > options_.safe_lifetime)) {return {};}
+  const auto & source = view == EvidenceView::Retained ? retained_ : cells_;
+  auto it = source.find(key);
+  if (it == source.end() ||
+    (view == EvidenceView::Local && (it->second.cost == 0 || it->second.reason == 30) &&
+    now - it->second.stamp > options_.safe_lifetime)) {return {};}
   return it->second;
 }
-TerrainCell TerrainModel::area(const std::array<std::array<double, 2>, 4> & q, double now) const
+TerrainCell TerrainModel::area(
+  const std::array<std::array<double, 2>, 4> & q, double now,
+  EvidenceView view) const
 {
   double xmin = INFINITY, ymin = INFINITY, xmax = -INFINITY, ymax = -INFINITY;
   for (const auto & p:q) {
@@ -232,7 +283,7 @@ TerrainCell TerrainModel::area(const std::array<std::array<double, 2>, 4> & q, d
   for (int y = int(std::floor(ymin / r)); y <= int(std::floor(ymax / r)); ++y) {
     for (int x = int(std::floor(xmin / r)); x <= int(std::floor(xmax / r)); ++x) {
       if (!overlap(q, x * r, y * r, r)) {continue;}
-      any = true; auto value = at({x, y}, now);
+      any = true; auto value = at({x, y}, now, view);
       if (value.cost == 254) {return value;}
       unknown |= value.cost == 255;
     }

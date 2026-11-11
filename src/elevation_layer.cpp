@@ -55,7 +55,7 @@ void ElevationLayer::onInitialize()
   options.max_spread = parameter("max_height_spread", .03);
   options.max_slope_deg = parameter("max_slope_deg", 7.);
   options.safe_lifetime = parameter("safe_lifetime", 30.);
-  const int64_t min_points = parameter("min_points", int64_t(6));
+  const int64_t min_points = parameter("min_points", int64_t(20));
   const int64_t frames = parameter("accumulation_frames", int64_t(5));
   if (min_points < 3 || min_points > 10000 || frames < 1 || frames > 20 ||
     !std::isfinite(max_age_) || max_age_ <= 0 || max_age_ > 2. || evidence_frame_.empty() ||

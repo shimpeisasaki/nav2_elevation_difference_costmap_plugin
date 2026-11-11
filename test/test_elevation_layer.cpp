@@ -44,12 +44,12 @@ TEST(ElevationLayer, PreservesExistingObstaclesAndRejectsStaleObservations)
         sensor_msgs::PointCloud2Modifier modifier(cloud);modifier.setPointCloud2FieldsByString(
           1,
           "xyz");
-        modifier.resize(13 * 11 * 9);
+        modifier.resize(13 * 11 * 25);
         sensor_msgs::PointCloud2Iterator<float> x(cloud, "x"), y(cloud, "y"), z(cloud, "z");
         for (int iy = -5; iy <= 5; ++iy) {
           for (int ix = -6; ix <= 6; ++ix) {
-            for (double dx:{.015, .05, .085}) {
-              for (double dy:{.015, .05, .085}) {
+            for (double dx:{.01, .03, .05, .07, .09}) {
+              for (double dy:{.01, .03, .05, .07, .09}) {
                 *x = ix * .1 + dx;*y = iy * .1 + dy;
                 *z = std::tan(6. * std::acos(-1.) / 180.) * (*x) + (ix >= 0 ? step : 0.);
                 ++x;++y;++z;

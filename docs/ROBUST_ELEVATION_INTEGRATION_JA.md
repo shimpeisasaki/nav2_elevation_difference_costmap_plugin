@@ -1,12 +1,13 @@
 # 地形評価改良版の統合方針（簡略版）
 
-状態：設計案。ユーザーの追加方針に合わせ、改良範囲を次の3点に絞る。
-この更新では実装・launch・既定値・branchを変更していない。
+状態：合意した簡略方針を`feature/robust-elevation-integration`に実装。
+変更範囲は最小点数・統計処理・地形保持と既存global mapへの合成。
 
 ## 採用する3点
 
 1. **最小点数**：十分な点数になるまで判定を保留する。
-   旧方式の20点を最初の比較基準とし、現在の6点との誤検出・判定待ち時間を比べる。
+   既定を20点に変更。6点設定は明示した比較用プロファイルとして残す。
+   20点未満のセルだけでは、新たな安全・危険判定を確定しない。
 2. **統計処理**：最新5採用入力の蓄積、10/50/90%分位点を使う。
    **10–90%分位区間の同じ点集合から求めるXYZ重心を採用する。**
    草・グレーチング状の入力と実段差を同じ条件で比較する。
@@ -39,17 +40,21 @@
 
 必要な座標変換と、既存の地図合成は維持する。
 
-## 現試作の保存先と出力
+## 改良版の保存先と出力
 
 `TerrainModel::frames_`は最新5入力のXYZ点群。
 `TerrainModel::cells_`はodomのXY格子に対応する判定・理由・時刻のメモリ内cache。
+`TerrainModel::retained_`は探索adapterだけが有効にする実測地形の保持cache。
+安全(reason=20)、段差(reason=40/50)、傾斜(reason=60)をsession中保持する。
+混在(reason=30)だけでは保持cacheを更新せず、既存危険・安全を消さない。
 30秒分のXYZ全点や高さ面を保存しているわけではない。
 Nav2 layerと探索adapterはそれぞれ自分のTerrainModel instanceを持つ。
 
 - `/recovery/map`：SLAM地図。読み取り専用で、一切書き戻さない。
-- `/recovery/navigation_map`：保持した安全判定を局所走行の支持確認に使う。
-- `/recovery/global_navigation_map`：SLAMへ地形危険を合成する派生地図。
-  安全地面を理由にSLAMのunknownをfreeへ変更しない。
+- `/recovery/navigation_map`：直近の判定を使い、観測窓を離れた場所は保持cacheも使う。
+  直近の混在が以前の安全地面に隠されないようにする。
+- `/recovery/global_navigation_map`：保持cacheの安全地面をfree、危険をoccupiedとして合成。
+  SLAM unknownも実測安全でfreeにできるが、SLAM occupiedを消さない。
 
 局所回避と探索地図の目的は区別するが、今回の改良では新しい保持・確定システムを増やさない。
 
@@ -61,13 +66,15 @@ Nav2 layerと探索adapterはそれぞれ自分のTerrainModel instanceを持つ
 - 実測安全地面はSLAM unknownをfreeへ更新できる。SLAMのoccupiedは消さない。
 - 地形危険はfree/unknownへ優先してoccupiedを反映する。
 - ばらつき・点数不足だけの判定を、確かな低障害物として地図に残さない。
-- 現試作の30秒安全cacheだけでは探索中の保持を満たさないため、この保持方針を変更する。
+- 単体local layerの30秒cacheとは別に、探索adapterだけが保持cacheを有効化する。
+  新しいノードやNav2 layerは増やさない。
 
 元pluginのセル内評価はz_max−z_min。現試作はp90−p10へ変更済みだが、
-現在の順位式では6点時にp10=min、p90=maxとなる。十分な点数条件を統計と合わせて改良する。
+順位式では6点時にp10=min、p90=maxとなる。既定20点と正確なソート統計を組み合わせた。
+p10/p50/p90と同じ分位区間のXYZ重心は共通のheightStatistics関数で計算する。
 セル内高さ幅は混在・凹凸の指標であり、セル間段差の平面比較とは別の判定。
 
-## 実装・評価の順序
+## 実装・評価
 
 1. 前回試作を基準として保全し、新branchを作る。
 2. 点数条件と統計部分を改良する。Nav2接続は既存構造を使い、
@@ -81,7 +88,7 @@ Nav2 layerと探索adapterはそれぞれ自分のTerrainModel instanceを持つ
 
 ## Git
 
-予定する新branchは3リポジトリ共通の`feature/robust-elevation-integration`。
-現在の`feature/elevation-difference-exploration`には未コミット差分があるため、
-実装開始時に先に基準commitとして保全する。ドライバ等の既存差分は含めない。
-今回は方針書だけを更新し、branch作成・commit・pushはしていない。
+新branchは3リポジトリ共通の`feature/robust-elevation-integration`。
+前回試作は旧branchの基準commitに保全済み：plugin `5de78c6`、
+recovery_navigation `2f4f3b6`、recovery_exploration `9e50f99`。
+ドライバ等の既存差分は含めず、remoteへのpushは行わない。

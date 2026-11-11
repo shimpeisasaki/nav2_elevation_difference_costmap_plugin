@@ -2,7 +2,7 @@
 /**:
   ros__parameters:
     evidence_resolution: 0.1
-    min_points: 6
+    min_points: 20
     accumulation_frames: 5
     step_height: 0.03
     max_height_spread: 0.03

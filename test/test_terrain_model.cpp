@@ -12,8 +12,8 @@ std::vector<Point> scene(double sx = 0., double sy = 0., double step = 0., doubl
   std::vector<Point> points;
   for (int y = -5; y <= 5; ++y) {
     for (int x = -6; x <= 6; ++x) {
-      for (double dx:{.015, .05, .085}) {
-        for (double dy:{.015, .05, .085}) {
+      for (double dx:{.01, .03, .05, .07, .09}) {
+        for (double dy:{.01, .03, .05, .07, .09}) {
           const double wx = x * .1 + dx, wy = y * .1 + dy;
           points.push_back({wx, wy, sx * wx + sy * wy + (wx >= edge ? step : 0.)});
         }
@@ -25,6 +25,141 @@ std::vector<Point> scene(double sx = 0., double sy = 0., double step = 0., doubl
 terrain::TerrainOptions options()
 {terrain::TerrainOptions o; o.accumulation_frames = 1; return o;}
 
+TEST(HeightStatistics, RejectsSmallSamplesAndTrimsSparseExtremeReturns)
+{
+  std::vector<Point> six(6, {.04, .07, 0.});
+  six.front().z = -.06; six.back().z = .08;
+  EXPECT_FALSE(terrain::heightStatistics(six));
+  const auto comparison = terrain::heightStatistics(six, 6);
+  ASSERT_TRUE(comparison);
+  EXPECT_DOUBLE_EQ(comparison->upper - comparison->lower, .14);
+  std::vector<Point> points(18, {.04, .07, 0.});
+  points.push_back({99., 99., -.06});
+  points.push_back({-99., -99., .08});
+  const auto stats = terrain::heightStatistics(points);
+  ASSERT_TRUE(stats); EXPECT_EQ(stats->count, 20u);
+  EXPECT_DOUBLE_EQ(stats->lower, 0.); EXPECT_DOUBLE_EQ(stats->median, 0.);
+  EXPECT_DOUBLE_EQ(stats->upper, 0.);
+  EXPECT_NEAR(stats->centroid.x, .04, 1e-12);
+  EXPECT_NEAR(stats->centroid.y, .07, 1e-12);
+  EXPECT_DOUBLE_EQ(stats->centroid.z, 0.);
+}
+TEST(HeightStatistics, CentroidUsesTheSameQuantilePointsAndMedianStaysSeparate)
+{
+  std::vector<Point> points;
+  for (int i = 0; i < 20; ++i) {
+    points.push_back({i * .002, i * .003, i * .001});
+  }
+  auto stats = terrain::heightStatistics(points);
+  ASSERT_TRUE(stats);
+  EXPECT_NEAR(stats->lower, .001, 1e-12);
+  EXPECT_NEAR(stats->median, .010, 1e-12);
+  EXPECT_NEAR(stats->upper, .017, 1e-12);
+  EXPECT_NEAR(stats->centroid.x, .018, 1e-12);
+  EXPECT_NEAR(stats->centroid.y, .027, 1e-12);
+  EXPECT_NEAR(stats->centroid.z, .009, 1e-12);
+  points.push_back({NAN, 0., 0.});
+  auto filtered = terrain::heightStatistics(points);
+  ASSERT_TRUE(filtered); EXPECT_EQ(filtered->count, 20u);
+}
+TEST(TerrainModel, SixReturnsPerCellNeedDistinctInputsToReachDefaultMinimum)
+{
+  std::vector<Point> sparse;
+  for (int y = -5; y <= 5; ++y) {
+    for (int x = -6; x <= 6; ++x) {
+      for (int i = 0; i < 6; ++i) {
+        sparse.push_back({x * .1 + .05, y * .1 + .05, 0.});
+      }
+    }
+  }
+  terrain::TerrainModel model;
+  for (int frame = 1; frame <= 3; ++frame) {
+    ASSERT_TRUE(model.observe(sparse, frame));
+    EXPECT_EQ(model.at({0, 0}, frame).cost, 255);
+    EXPECT_FALSE(model.observe(sparse, frame));
+  }
+  ASSERT_TRUE(model.observe(sparse, 4.));
+  EXPECT_EQ(model.at({0, 0}, 4.).cost, 0);
+}
+TEST(TerrainModel, RetainsMeasuredGroundAndLowObstacleBeyondWindowAndLocalLifetime)
+{
+  auto o = options(); o.retain_global_evidence = true;
+  terrain::TerrainModel model(o);
+  auto points = scene();
+  for (auto & p : points) {
+    if (p.x > 0 && p.x < .1 && p.y > 0 && p.y < .1) {p.z = .06;}
+  }
+  ASSERT_TRUE(model.observe(points, 1.));
+  EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
+  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 254);
+  ASSERT_TRUE(model.observe({}, 100.));
+  EXPECT_EQ(model.at({-3, 0}, 100.).cost, 255);
+  EXPECT_EQ(model.at({-3, 0}, 100., terrain::EvidenceView::Retained).cost, 0);
+  EXPECT_EQ(model.at({0, 0}, 100., terrain::EvidenceView::Retained).cost, 254);
+  terrain::GridProjection identity({1, 0, 0, 0, 1, 0});
+  EXPECT_EQ(
+    model.area(
+      identity.sourceQuad(
+        -.3, 0.,
+        .1), 100., terrain::EvidenceView::Retained).cost, 0);
+  EXPECT_EQ(
+    model.area(
+      identity.sourceQuad(
+        0., 0.,
+        .1), 100., terrain::EvidenceView::Retained).cost, 254);
+  ASSERT_TRUE(model.observe(scene(), 101.));
+  EXPECT_EQ(model.at({0, 0}, 101., terrain::EvidenceView::Retained).cost, 0);
+  ASSERT_TRUE(model.observe(points, 102.));
+  EXPECT_EQ(model.at({0, 0}, 102., terrain::EvidenceView::Retained).cost, 254);
+  auto mixed = scene();
+  for (int i = 0; i < 25; ++i) {
+    mixed.push_back({.05, .05, .12});
+  }
+  ASSERT_TRUE(model.observe(mixed, 103.));
+  EXPECT_EQ(model.at({0, 0}, 103.).reason, 30);
+  EXPECT_EQ(model.at({0, 0}, 103., terrain::EvidenceView::Retained).cost, 254);
+  model.reset(); EXPECT_EQ(model.retainedSize(), 0u);
+  EXPECT_EQ(model.at({0, 0}, 103., terrain::EvidenceView::Retained).cost, 255);
+}
+TEST(TerrainModel, ThreeCentimeterLowObstacleDoesNotBiasItsOwnReferencePlane)
+{
+  auto o = options(); o.retain_global_evidence = true;
+  terrain::TerrainModel model(o);
+  auto points = scene();
+  for (auto & p : points) {
+    if (p.x > 0 && p.x < .1 && p.y > 0 && p.y < .1) {p.z = .03;}
+  }
+  ASSERT_TRUE(model.observe(points, 1.));
+  EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
+  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 254);
+}
+TEST(TerrainModel, MixedHeightsAloneDoNotBecomeRetainedObstacles)
+{
+  auto o = options(); o.retain_global_evidence = true;
+  terrain::TerrainModel model(o);
+  auto points = scene();
+  // Two substantial height groups: do not pretend the extra group is a lone
+  // outlier or promote the mixed cell to a confirmed step via neighboring cells.
+  for (int i = 0; i < 25; ++i) {
+    points.push_back({.05, .05, .12});
+  }
+  ASSERT_TRUE(model.observe(points, 1.));
+  EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
+  EXPECT_EQ(model.at({0, 0}, 1.).reason, 30);
+  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 255);
+  ASSERT_TRUE(model.observe({}, 40.));
+  EXPECT_EQ(model.at({0, 0}, 40.).cost, 255);
+  ASSERT_TRUE(model.observe(scene(), 41.));
+  EXPECT_EQ(model.at({0, 0}, 41., terrain::EvidenceView::Retained).cost, 0);
+  ASSERT_TRUE(model.observe(points, 42.));
+  EXPECT_EQ(model.at({0, 0}, 42., terrain::EvidenceView::Retained).cost, 0);
+}
+TEST(TerrainModel, LocalLayerDoesNotAllocateExplorationMemory)
+{
+  terrain::TerrainModel model(options()); model.observe(scene(), 1.);
+  EXPECT_EQ(model.retainedSize(), 0u);
+  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 255);
+}
 TEST(TerrainModel, FlatAndSixDegreeRampsRemainSafe)
 {
   for (double angle:{0., 6., -6.}) {
@@ -110,7 +245,7 @@ TEST(TerrainModel, SparseOrCollinearSupportDoesNotEstablishGround)
   EXPECT_EQ(model.at({0, 0}, 1.).cost, 255);
   std::vector<Point> line;
   for (int x = -5; x < 5; ++x) {
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 20; ++i) {
       line.push_back({x *.1 + .05, .05, 0.});
     }
   }
@@ -119,7 +254,7 @@ TEST(TerrainModel, SparseOrCollinearSupportDoesNotEstablishGround)
 }
 TEST(TerrainModel, WindowAccumulatesOnlyDistinctInputs)
 {
-  terrain::TerrainOptions o; o.min_points = 18; o.accumulation_frames = 2;
+  terrain::TerrainOptions o; o.min_points = 50; o.accumulation_frames = 2;
   terrain::TerrainModel model(o);
   model.observe(scene(), 1.);
   EXPECT_EQ(model.at({0, 0}, 1.).cost, 255);
