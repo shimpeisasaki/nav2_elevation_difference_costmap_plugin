@@ -3,6 +3,9 @@
 標準PointCloud2から地形の高さ分布・傾斜・段差を評価するNav2 pluginと共通C++評価器。
 開発ブランチは `feature/robust-elevation-integration`。
 
+採用元・公開interface・変更と検証の規則は[保守資料](docs/maintenance.md)。
+CATの正常更新1.5秒leaseは[利用側契約](../recovery_navigation/CURRENT_NAVIGATION.md)を参照。
+
 2026-11-11の改修では、単一フレームのz_max−z_min方式を拡張した。
 センサ固有のline/tag/intensityは使わず、FLOAT32のx/y/zと取得時刻のTFを使用する。
 Horizonにも接続できる。実機走行は未検証。
