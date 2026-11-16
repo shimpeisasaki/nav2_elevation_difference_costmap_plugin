@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check Livox rosbag data with ElevationLayer without launching all of Nav2.
+"""
+Check Livox rosbag data with ElevationLayer without launching all of Nav2.
 
 The script starts only nav2_costmap_2d, activates its lifecycle, relays
-/livox/lidar to the plugin's hard-coded /surestar_points input, plays the bag
+/livox/lidar to the plugin's configured /surestar_points input, plays the bag
 with simulated time, and checks the resulting /costmap/costmap.
 
 Usage:
@@ -62,6 +63,7 @@ def make_params_file(
               elevation_layer:
                 plugin: "nav2_elevation_difference_costmap_plugin::ElevationLayer"
                 enabled: true
+                topic: /surestar_points
               always_send_full_costmap: true
         """
     ).strip()
@@ -444,7 +446,8 @@ class LivoxCheckNode(Node):
             )
 
         print("\n[compatibility]")
-        print(f"PointCloud2 XYZ : {'OK' if self.cloud_error is None and self.cloud_count else 'NG'}")
+        compatible = self.cloud_error is None and self.cloud_count
+        print(f"PointCloud2 XYZ : {'OK' if compatible else 'NG'}")
         if self.cloud_error is not None:
             print(f"  reason        : {self.cloud_error}")
         print(
