@@ -20,11 +20,14 @@ Horizonにも接続できる。実機走行は未検証。
   支持不足時は観測された隣接高低差を使用する。
 - 点数不足・空間支持不足はunknown。既存危険を不足データだけで消さない。
 - 単体local layerの安全地面は30秒保持。混在のみのコストも期限付きで扱う。
-- 探索adapterは実測安全地面と幾何的に確認した段差・傾斜をsession中保持する。
+- 探索adapterは実測安全地面、セル内高さ幅30mm以上の段差、周囲との段差・傾斜をsession中保持する。
   これはlocal layerへ新しい永続レイヤーを追加するものではない。
 - 全ターゲットセル面積を保守的に投影し、unknownや危険を補間でfreeにしない。
 
 旧方式の5mm/10mm固定しきい値は廃止し、全しきい値をparameter化した。
+上り・下りの区別は廃止し、周囲との段差理由は40に統合する。
+斜面判定は`slope_detection_enabled`（既定true）で実行中も切替可能。
+適用時期・保持cacheの扱いは[統合仕様](docs/ROBUST_ELEVATION_INTEGRATION_JA.md)を参照。
 
 ## Nav2 layerとしての使用
 
@@ -44,6 +47,7 @@ local_costmap:
         accumulation_frames: 5
         step_height: 0.03
         max_height_spread: 0.03
+        slope_detection_enabled: true
         max_slope_deg: 7.0
         safe_lifetime: 30.0
         beam_filter.enabled: false

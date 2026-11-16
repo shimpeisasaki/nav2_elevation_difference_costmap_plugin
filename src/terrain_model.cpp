@@ -90,7 +90,7 @@ bool surfacePlane(const std::vector<Surface> & rows, double max_residual, Plane 
 bool retainable(const TerrainCell & cell)
 {
   return (cell.cost == 0 && cell.reason == 20) ||
-         (cell.cost == 254 && (cell.reason == 40 || cell.reason == 50 || cell.reason == 60));
+         (cell.cost == 254 && (cell.reason == 30 || cell.reason == 40 || cell.reason == 60));
 }
 bool overlap(const std::array<std::array<double, 2>, 4> & q, double x, double y, double r)
 {
@@ -124,6 +124,19 @@ TerrainModel::TerrainModel(TerrainOptions options)
     options.accumulation_frames > 20) {throw std::invalid_argument("Invalid terrain options");}
 }
 void TerrainModel::reset() {frames_.clear(); cells_.clear(); retained_.clear(); last_stamp_ = -1.;}
+void TerrainModel::setSlopeDetectionEnabled(bool enabled)
+{
+  if (options_.slope_detection_enabled == enabled) {return;}
+  options_.slope_detection_enabled = enabled;
+  if (!enabled) {
+    // Withdraw slope-only evidence; new observations must establish support.
+    for (auto * cache : {&cells_, &retained_}) {
+      for (auto it = cache->begin(); it != cache->end(); ) {
+        if (it->second.reason == 60) {it = cache->erase(it);} else {++it;}
+      }
+    }
+  }
+}
 bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
 {
   if (!std::isfinite(stamp) || stamp <= last_stamp_ || stamp < 0 || input.size() > 1000000) {
@@ -194,8 +207,8 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
       if (surfacePlane(neighbors, options_.max_spread, fitted)) {
         const double residual = s.z - fitted.z(s.x, s.y);
         if (std::abs(residual) >= options_.step_height - 1e-8) {
-          cell = {254, uint8_t(residual > 0 ? 40 : 50), stamp};
-        } else if (std::hypot(
+          cell = {254, 40, stamp};
+        } else if (options_.slope_detection_enabled && std::hypot(
             fitted.a,
             fitted.b) > std::tan(options_.max_slope_deg * std::acos(-1.) / 180.) + 1e-8)
         {
@@ -225,8 +238,8 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
         dz = right.z(x, y) - left.z(x, y);
       }
       if (std::abs(dz) >= options_.step_height - 1e-8) {
-        evaluated[key] = {254, uint8_t(dz > 0 ? 40 : 50), stamp};
-        evaluated[neighbor] = {254, uint8_t(dz > 0 ? 40 : 50), stamp};
+        evaluated[key] = {254, 40, stamp};
+        evaluated[neighbor] = {254, 40, stamp};
       }
     }
   }

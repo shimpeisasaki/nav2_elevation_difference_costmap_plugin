@@ -133,7 +133,7 @@ TEST(TerrainModel, ThreeCentimeterLowObstacleDoesNotBiasItsOwnReferencePlane)
   EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
   EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 254);
 }
-TEST(TerrainModel, MixedHeightsAloneDoNotBecomeRetainedObstacles)
+TEST(TerrainModel, MixedHeightStepsAreRetainedAndClearedBySafeObservation)
 {
   auto o = options(); o.retain_global_evidence = true;
   terrain::TerrainModel model(o);
@@ -146,13 +146,13 @@ TEST(TerrainModel, MixedHeightsAloneDoNotBecomeRetainedObstacles)
   ASSERT_TRUE(model.observe(points, 1.));
   EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
   EXPECT_EQ(model.at({0, 0}, 1.).reason, 30);
-  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 255);
+  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 254);
   ASSERT_TRUE(model.observe({}, 40.));
   EXPECT_EQ(model.at({0, 0}, 40.).cost, 255);
   ASSERT_TRUE(model.observe(scene(), 41.));
   EXPECT_EQ(model.at({0, 0}, 41., terrain::EvidenceView::Retained).cost, 0);
   ASSERT_TRUE(model.observe(points, 42.));
-  EXPECT_EQ(model.at({0, 0}, 42., terrain::EvidenceView::Retained).cost, 0);
+  EXPECT_EQ(model.at({0, 0}, 42., terrain::EvidenceView::Retained).cost, 254);
 }
 TEST(TerrainModel, LocalLayerDoesNotAllocateExplorationMemory)
 {
@@ -317,4 +317,38 @@ TEST(PointCloud, ValidatesLayoutAndHandlesOrganizedRowPadding)
   cloud.data.resize(60);EXPECT_THROW(terrain::readPoints(cloud), std::invalid_argument);
   cloud.data.resize(80);cloud.fields[0].datatype = 8;
   EXPECT_THROW(terrain::readPoints(cloud), std::invalid_argument);
+}
+
+TEST(TerrainModel, SlopeSwitchWithdrawsSlopeOnlyEvidenceAndKeepsStepDetection)
+{
+  auto o = options(); o.retain_global_evidence = true;
+  terrain::TerrainModel model(o);
+  auto ramp = scene(std::tan(10. * std::acos(-1.) / 180.));
+  ASSERT_TRUE(model.observe(ramp, 1.));
+  ASSERT_EQ(model.at({0, 0}, 1.).reason, 60);
+  model.setSlopeDetectionEnabled(false);
+  EXPECT_EQ(model.at({0, 0}, 1., terrain::EvidenceView::Retained).cost, 255);
+  ASSERT_TRUE(model.observe(ramp, 2.));
+  EXPECT_EQ(model.at({0, 0}, 2.).cost, 0);
+  auto mixed = scene();
+  for (int i = 0; i < 25; ++i) {mixed.push_back({.05, .05, .03});}
+  ASSERT_TRUE(model.observe(mixed, 3.));
+  EXPECT_EQ(model.at({0, 0}, 3.).reason, 30);
+  EXPECT_EQ(model.at({0, 0}, 3., terrain::EvidenceView::Retained).cost, 254);
+  ASSERT_TRUE(model.observe(scene(0., 0., .04), 4.));
+  EXPECT_EQ(model.at({0, 0}, 4.).cost, 254);
+  model.setSlopeDetectionEnabled(true);
+  ASSERT_TRUE(model.observe(ramp, 5.));
+  EXPECT_EQ(model.at({0, 0}, 5.).reason, 60);
+}
+
+TEST(TerrainModel, PositiveAndNegativeStepsShareOneReason)
+{
+  for (double height : {-.03, .03}) {
+    auto o = options(); o.slope_detection_enabled = false;
+    terrain::TerrainModel model(o);
+    ASSERT_TRUE(model.observe(scene(0., 0., height), 1.));
+    EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
+    EXPECT_EQ(model.at({0, 0}, 1.).reason, 40);
+  }
 }

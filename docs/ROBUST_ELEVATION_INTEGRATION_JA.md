@@ -45,8 +45,9 @@
 `TerrainModel::frames_`は最新5入力のXYZ点群。
 `TerrainModel::cells_`はodomのXY格子に対応する判定・理由・時刻のメモリ内cache。
 `TerrainModel::retained_`は探索adapterだけが有効にする実測地形の保持cache。
-安全(reason=20)、段差(reason=40/50)、傾斜(reason=60)をsession中保持する。
-混在(reason=30)だけでは保持cacheを更新せず、既存危険・安全を消さない。
+安全(reason=20)、セル内高さ幅30mm以上の段差(reason=30)、周囲との段差(reason=40)、
+傾斜(reason=60)をsession中保持する。上り・下りは区別しない。
+reason=30も既存安全をoccupiedに更新し、後の十分な安全再観測で解除できる。
 30秒分のXYZ全点や高さ面を保存しているわけではない。
 Nav2 layerと探索adapterはそれぞれ自分のTerrainModel instanceを持つ。
 
@@ -65,7 +66,8 @@ Nav2 layerと探索adapterはそれぞれ自分のTerrainModel instanceを持つ
   既存static layer経由でNav2 global costmapへ反映する。新しいmap layerは追加しない。
 - 実測安全地面はSLAM unknownをfreeへ更新できる。SLAMのoccupiedは消さない。
 - 地形危険はfree/unknownへ優先してoccupiedを反映する。
-- ばらつき・点数不足だけの判定を、確かな低障害物として地図に残さない。
+- p90−p10がmax_height_spread（既定30mm）以上の判定も障害物として保持する。
+  点数不足だけでは保持を更新しない。
 - 単体local layerの30秒cacheとは別に、探索adapterだけが保持cacheを有効化する。
   新しいノードやNav2 layerは増やさない。
 
@@ -92,3 +94,29 @@ p10/p50/p90と同じ分位区間のXYZ重心は共通のheightStatistics関数�
 前回試作は旧branchの基準commitに保全済み：plugin `5de78c6`、
 recovery_navigation `2f4f3b6`、recovery_exploration `9e50f99`。
 ドライバ等の既存差分は含めず、remoteへのpushは行わない。
+
+## 2026-11-16の判定更新
+
+高さ混在(reason=30)を30mm以上の段差としてglobal mapへ反映する。
+周辺平面・隣接面の段差理由は40に統合し、50を新規出力しない。
+`slope_detection_enabled`は既定true。単体layerと探索adapterの両方で変更可能。
+OFFでも平面比較による段差検出・セル内高さ幅判定は続ける。
+変更は次の正常に採用する点群から適用する。OFF時は傾斜のみを理由とする
+局所・保持cacheを除去し、安全へ自動変換せず新しい観測で再評価する。
+他の障害物、初期領域、epoch、鮮度通知の契約は変更しない。
+
+```bash
+# 起動中の探索adapter。再度trueを設定すればONに戻る。
+ros2 param set /elevation_difference_mapper slope_detection_enabled false
+```
+
+起動時はconfig/horizon_terrain.yamlの同名項目を設定する。
+単体Nav2 layerではcostmap nodeの`<layer名>.slope_detection_enabled`を設定する。
+以前の記録は当時の契約のまま保存し、本更新の検証は別途記録する。
+
+検証：2026-11-16、Humble・合成入力による地形モデル22件、layer1件、mapper/Nav2連携1件が成功。
+mapper試験で30mm混在のglobal反映・安全再観測による解除・斜面ON/OFFを確認。
+完全SHA・dirty diff・環境・コマンド・初回失敗と修正はworkspaceの
+`log/terrain_global_evidence_20261116/result.json`と隣接diff、
+`log/terrain_global_accept_build/`、`log/terrain_global_accept_test/`に保存。
+本変更後の走行シミュレーションと実機受入は未実施。

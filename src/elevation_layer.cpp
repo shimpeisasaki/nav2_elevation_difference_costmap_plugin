@@ -54,6 +54,7 @@ void ElevationLayer::onInitialize()
   options.step_height = parameter("step_height", .03);
   options.max_spread = parameter("max_height_spread", .03);
   options.max_slope_deg = parameter("max_slope_deg", 7.);
+  options.slope_detection_enabled = parameter("slope_detection_enabled", true);
   options.safe_lifetime = parameter("safe_lifetime", 30.);
   const int64_t min_points = parameter("min_points", int64_t(20));
   const int64_t frames = parameter("accumulation_frames", int64_t(5));
@@ -135,6 +136,7 @@ void ElevationLayer::updateCosts(
         if (beam_enabled_ && (beam_negative_ ? inside : !inside)) {continue;}
         auto q = transform * tf2::Vector3(p.x, p.y, p.z); points.push_back({q.x(), q.y(), q.z()});
       }
+      model_->setSlopeDetectionEnabled(node->get_parameter(name_ + ".slope_detection_enabled").as_bool());
       if (!model_->observe(points, stamp.seconds())) {return;}
     }
     // Reprojection may follow SLAM corrections; observations stay fixed in odom.

@@ -28,6 +28,7 @@ struct TerrainOptions
   unsigned min_points{20}, accumulation_frames{5};
   // Enable only for the exploration adapter, not the standalone local layer.
   bool retain_global_evidence{false};
+  bool slope_detection_enabled{true};
 };
 struct HeightStatistics
 {
@@ -70,6 +71,7 @@ public:
     const std::array<std::array<double, 2>, 4> & quad, double now,
     EvidenceView view = EvidenceView::Local) const;
   void reset();
+  void setSlopeDetectionEnabled(bool enabled);
   double lastStamp() const {return last_stamp_;}
   size_t size() const {return cells_.size();}
   size_t retainedSize() const {return retained_.size();}
@@ -80,8 +82,8 @@ private:
   double last_stamp_{-1.};
   std::deque<std::vector<Point>> frames_;
   std::unordered_map<Key, TerrainCell, KeyHash> cells_;
-  // Measured ground and geometrically supported hazards. Never initial assumptions
-  // or a mixed-height distribution alone; corrected by later sufficient evidence.
+  // Measured ground and hazards, including >= max_spread height differences.
+  // Never initial assumptions; corrected by later sufficient evidence.
   std::unordered_map<Key, TerrainCell, KeyHash> retained_;
 };
 }  // namespace nav2_elevation_difference_costmap_plugin
