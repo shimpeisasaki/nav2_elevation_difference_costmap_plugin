@@ -136,7 +136,9 @@ void ElevationLayer::updateCosts(
         if (beam_enabled_ && (beam_negative_ ? inside : !inside)) {continue;}
         auto q = transform * tf2::Vector3(p.x, p.y, p.z); points.push_back({q.x(), q.y(), q.z()});
       }
-      model_->setSlopeDetectionEnabled(node->get_parameter(name_ + ".slope_detection_enabled").as_bool());
+      model_->setSlopeDetectionEnabled(
+        node->get_parameter(
+          name_ + ".slope_detection_enabled").as_bool());
       if (!model_->observe(points, stamp.seconds())) {return;}
     }
     // Reprojection may follow SLAM corrections; observations stay fixed in odom.

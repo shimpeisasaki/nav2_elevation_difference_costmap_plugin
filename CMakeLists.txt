@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.8)
 project(nav2_elevation_difference_costmap_plugin)
 
+# The mapper queries this library twice for every SLAM cell. An unset build
+# type otherwise compiles that hot path without optimization, even though the
+# consuming recovery_navigation executable defaults to RelWithDebInfo.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

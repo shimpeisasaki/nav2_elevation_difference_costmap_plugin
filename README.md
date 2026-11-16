@@ -76,6 +76,12 @@ Horizon用parameterは `config/horizon_terrain.yaml`。
 
 ## Build / offline test
 
+`CMAKE_BUILD_TYPE`未指定時は`RelWithDebInfo`。全SLAMセルから照会する共通評価器も
+最適化して構築する。明示的な`Debug`等の指定は維持するが、実行時間は別途測定する。
+既存の未指定cacheにも再configureで適用される。コンシューマーの実行器だけを
+最適化しても、この共有ライブラリの処理時間は改善しない。
+生成時間・配信・入力鮮度の診断は[利用側契約](../recovery_navigation/CURRENT_NAVIGATION.md#地図生成と配信の診断2026-11-16)を参照。
+
 ```bash
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --base-paths src \

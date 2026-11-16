@@ -331,7 +331,9 @@ TEST(TerrainModel, SlopeSwitchWithdrawsSlopeOnlyEvidenceAndKeepsStepDetection)
   ASSERT_TRUE(model.observe(ramp, 2.));
   EXPECT_EQ(model.at({0, 0}, 2.).cost, 0);
   auto mixed = scene();
-  for (int i = 0; i < 25; ++i) {mixed.push_back({.05, .05, .03});}
+  for (int i = 0; i < 25; ++i) {
+    mixed.push_back({.05, .05, .03});
+  }
   ASSERT_TRUE(model.observe(mixed, 3.));
   EXPECT_EQ(model.at({0, 0}, 3.).reason, 30);
   EXPECT_EQ(model.at({0, 0}, 3., terrain::EvidenceView::Retained).cost, 254);
