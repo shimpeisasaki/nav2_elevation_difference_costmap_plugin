@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+// allow: SIZE_OK - existing registered pure fixture owns terrain and decoder contracts.
 #include <gtest/gtest.h>
 #include "nav2_elevation_difference_costmap_plugin/terrain_model.hpp"
 #include "nav2_elevation_difference_costmap_plugin/point_cloud.hpp"
@@ -202,7 +203,7 @@ TEST(TerrainModel, ExcessiveSlopeIsHazardInAllDirections)
 TEST(TerrainModel, CellAlignedStepsAndDropsAlsoOnDownhillRamp)
 {
   for (double grade:{0., -std::tan(6. * std::acos(-1.) / 180.)}) {
-    for (double step:{.03, -.03}) {
+    for (double step:{.03, -.03, .2, -.2}) {
       terrain::TerrainModel model(options()); model.observe(scene(grade, 0, step), 1.);
       EXPECT_EQ(model.at({-1, 0}, 1.).cost, 254) << grade << " " << step;
       EXPECT_EQ(model.at({0, 0}, 1.).cost, 254) << grade << " " << step;
@@ -212,7 +213,7 @@ TEST(TerrainModel, CellAlignedStepsAndDropsAlsoOnDownhillRamp)
 TEST(TerrainModel, StepDetectionDoesNotDependOnCellBoundaryAlignment)
 {
   for (double edge : {.015, .025, .065, .085}) {
-    for (double step : {-.03, .03}) {
+    for (double step : {-.2, -.03, .03, .2}) {
       terrain::TerrainModel model(options());
       model.observe(scene(0., 0., step, edge), 1.);
       EXPECT_EQ(model.at({0, 0}, 1.).cost, 254) << edge << " " << step;
@@ -346,11 +347,281 @@ TEST(TerrainModel, SlopeSwitchWithdrawsSlopeOnlyEvidenceAndKeepsStepDetection)
 
 TEST(TerrainModel, PositiveAndNegativeStepsShareOneReason)
 {
-  for (double height : {-.03, .03}) {
+  for (double height : {-.2, -.03, .03, .2}) {
     auto o = options(); o.slope_detection_enabled = false;
     terrain::TerrainModel model(o);
     ASSERT_TRUE(model.observe(scene(0., 0., height), 1.));
     EXPECT_EQ(model.at({0, 0}, 1.).cost, 254);
     EXPECT_EQ(model.at({0, 0}, 1.).reason, 40);
+    EXPECT_EQ(model.at({-4, 0}, 1.).cost, 0);
+    EXPECT_EQ(model.at({4, 0}, 1.).cost, 0);
+    EXPECT_TRUE(model.isMeasuredGround({-.35, .05, 0.}, 1.));
+    EXPECT_TRUE(model.isMeasuredGround({.45, .05, height}, 1.));
   }
+}
+
+TEST(MeasuredGround, TranslatedFloorsAndSixDegreeSlopesUsePointSpecificPlanes)
+{
+  for (double height : {0., .2, -.4}) {
+    for (double angle : {0., 6., -6.}) {
+      const double grade = std::tan(angle * std::acos(-1.) / 180.);
+      auto points = scene(grade / std::sqrt(2.), grade / std::sqrt(2.));
+      for (auto & p : points) {
+        p.z += height;
+      }
+      terrain::TerrainModel model(options());
+      ASSERT_TRUE(model.observe(points, 1.));
+      ASSERT_EQ(model.at({0, 0}, 1.).reason, 20);
+      for (const auto & p : points) {
+        if (p.x > 0. && p.x < .1 && p.y > 0. && p.y < .1) {
+          EXPECT_TRUE(model.isMeasuredGround(p, 1.)) << height << " " << angle;
+        }
+      }
+    }
+  }
+}
+
+TEST(MeasuredGround, SparseHeightOutliersInSafeCellsRemainObstacleCandidates)
+{
+  for (double height : {-.3, -.03, .03, .3}) {
+    auto points = scene();
+    const Point outlier{.05, .05, height};
+    points.push_back(outlier);
+    terrain::TerrainModel model(options());
+    ASSERT_TRUE(model.observe(points, 1.));
+    ASSERT_EQ(model.at({0, 0}, 1.).reason, 20);
+    EXPECT_TRUE(model.isMeasuredGround({.05, .05, 0.}, 1.));
+    EXPECT_FALSE(model.isMeasuredGround(outlier, 1.)) << height;
+  }
+}
+
+TEST(MeasuredGround, StrictBandShrinksWithMeasuredSpreadAndPlaneError)
+{
+  for (double spread : {0., .004, .028}) {
+    auto points = scene();
+    for (size_t i = 0; i < points.size(); ++i) {
+      points[i].z = (i % 2 ? 1. : -1.) * spread / 2.;
+    }
+    terrain::TerrainModel model(options());
+    ASSERT_TRUE(model.observe(points, 1.));
+    ASSERT_EQ(model.at({0, 0}, 1.).reason, 20);
+    EXPECT_EQ(model.isMeasuredGround({.05, .05, 0.}, 1.), spread < .015);
+    EXPECT_EQ(model.isMeasuredGround({.05, .05, .012}, 1.), spread == 0.);
+    EXPECT_FALSE(model.isMeasuredGround({.05, .05, .015}, 1.));
+  }
+  auto points = scene();
+  for (auto & p : points) {
+    if (p.x > .1 && p.x < .2 && p.y > .1 && p.y < .2) {p.z = .029;}
+  }
+  terrain::TerrainModel model(options());
+  ASSERT_TRUE(model.observe(points, 1.));
+  ASSERT_EQ(model.at({0, 0}, 1.).reason, 20);
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 1.));
+  points = scene();
+  for (auto & p : points) {
+    if (p.x > 0. && p.x < .1 && p.y > 0. && p.y < .1) {p.z = .02;}
+  }
+  terrain::TerrainModel raised(options());
+  ASSERT_TRUE(raised.observe(points, 1.));
+  ASSERT_EQ(raised.at({0, 0}, 1.).reason, 20);
+  EXPECT_FALSE(raised.isMeasuredGround({.05, .05, 0.}, 1.));
+  EXPECT_FALSE(raised.isMeasuredGround({.05, .05, .02}, 1.));
+}
+
+TEST(MeasuredGround, MeasuredFootprintAllowsMissingNeighborsButRejectsUnknownAndExtrapolation)
+{
+  for (int mode : {0, 1, 2}) {
+    std::vector<Point> points;
+    for (int y = -1; y <= 1; ++y) {
+      for (int x = -1; x <= 1; ++x) {
+        // Six cells need the self-inclusive fallback. Eight have independent
+        // support despite a missing corner; nine include that measured corner.
+        if ((mode == 0 && y == 1) || (mode == 1 && x == 1 && y == 1)) {continue;}
+        for (int i = 0; i < 20; ++i) {
+          points.push_back({x * .1 + .05, y * .1 + .05, 0.});
+        }
+      }
+    }
+    terrain::TerrainModel model(options());
+    ASSERT_TRUE(model.observe(points, 1.));
+    ASSERT_EQ(model.at({0, 0}, 1.).reason, 20);
+    EXPECT_EQ(model.isMeasuredGround({.05, .05, 0.}, 1.), mode != 0);
+    EXPECT_EQ(model.isMeasuredGround({.15, .15, 0.}, 1.), mode == 2);
+    ASSERT_EQ(model.at({-1, -1}, 1.).reason, 20);
+    // This query is in a known safe cell but outside its measured XY support.
+    EXPECT_FALSE(model.isMeasuredGround({-.09, -.09, 0.}, 1.));
+  }
+}
+
+TEST(MeasuredGround, AccumulatedRectangularScanCertifiesEveryBoundarySampleButKeepsHeightOutliers)
+{
+  std::vector<Point> points;
+  const double pitch = 15.57 * std::acos(-1.) / 180.;
+  const double c = std::cos(pitch), s = std::sin(pitch);
+  for (int y = -10; y < 10; ++y) {
+    for (int x = 8; x < 35; ++x) {
+      for (double dx : {.01, .04, .07}) {
+        for (double dy : {.01, .04, .07}) {
+          // Float sensor records, transformed back with the same source-time
+          // tilted mount as the consumer fixture, on a translated 0.2m floor.
+          const float sx = c * (x * .1 + dx + .27096) + s * .4357;
+          const float sy = -(y * .1 + dy);
+          const float sz = -s * (x * .1 + dx + .27096) + c * .4357;
+          points.push_back({c * sx - s * sz - .27096, -sy, -s * sx - c * sz + .6357});
+        }
+      }
+    }
+  }
+  ASSERT_EQ(points.size(), 4860u);
+  terrain::TerrainModel model;
+  for (int frame = 1; frame <= 3; ++frame) {
+    ASSERT_TRUE(model.observe(points, frame));
+    EXPECT_EQ(model.isMeasuredGround(points.front(), frame), frame == 3);
+  }
+  size_t certified = 0, boundary = 0, boundary_certified = 0, above_kept = 0, below_kept = 0;
+  for (const auto & p : points) {
+    const terrain::Key key{int(std::floor(p.x / .1)), int(std::floor(p.y / .1))};
+    ASSERT_EQ(model.at(key, 3.).reason, 20);
+    const bool ground = model.isMeasuredGround(p, 3.02);
+    certified += ground;
+    if (key.x == 8 || key.x == 34 || key.y == -10 || key.y == 9) {
+      ++boundary; boundary_certified += ground;
+    }
+    above_kept += !model.isMeasuredGround({p.x, p.y, p.z + .03}, 3.02);
+    below_kept += !model.isMeasuredGround({p.x, p.y, p.z - .03}, 3.02);
+  }
+  EXPECT_EQ(certified, 4860u);
+  ASSERT_EQ(boundary, 810u);
+  EXPECT_EQ(boundary_certified, 810u);
+  EXPECT_EQ(above_kept, 4860u); EXPECT_EQ(below_kept, 4860u);
+  EXPECT_FALSE(model.isMeasuredGround(points.front(), 2.999));
+  const auto & corner = points.front();
+  EXPECT_FALSE(model.isMeasuredGround({corner.x - .005, corner.y, corner.z}, 3.02));
+  EXPECT_FALSE(model.isMeasuredGround({corner.x, corner.y - .005, corner.z}, 3.02));
+}
+
+TEST(MeasuredGround, ClosedTriangularFootprintRejectsOffHullSafePointsAndInteriorUnknownHoles)
+{
+  std::vector<Point> points;
+  for (int y = -2; y <= 2; ++y) {
+    for (int x = -2; x <= 2; ++x) {
+      if (x + y < 0 || (x == 1 && y == 1)) {continue;}
+      for (int i = 0; i < 20; ++i) {
+        points.push_back({x * .1 + .05, y * .1 + .05, 0.});
+      }
+    }
+  }
+  terrain::TerrainModel model(options());
+  ASSERT_TRUE(model.observe(points, 1.));
+  ASSERT_EQ(model.at({0, 0}, 1.).reason, 20);
+  EXPECT_TRUE(model.isMeasuredGround({.05, .05, 0.}, 1.));
+  // Inside the bounding rectangle and a safe cell, but below the measured diagonal.
+  EXPECT_FALSE(model.isMeasuredGround({.01, .01, 0.}, 1.));
+  ASSERT_EQ(model.at({1, 1}, 1.).cost, 255);
+  // The convex hull surrounds this hole; absence of an own certificate still wins.
+  EXPECT_FALSE(model.isMeasuredGround({.15, .15, 0.}, 1.));
+}
+
+TEST(MeasuredGround, UnknownSparseCollinearMixedStepsAndSlopeHazardsRetainPoints)
+{
+  std::vector<std::vector<Point>> cases{{}, {{.05, .05, 0.}}};
+  std::vector<Point> line;
+  for (int x = -5; x <= 5; ++x) {
+    for (int i = 0; i < 20; ++i) {
+      line.push_back({x * .1 + .05, .05, 0.});
+    }
+  }
+  cases.push_back(line);
+  auto mixed = scene();
+  for (int i = 0; i < 25; ++i) {
+    mixed.push_back({.05, .05, .12});
+  }
+  cases.push_back(mixed);
+  cases.push_back(scene(0., 0., .03));
+  cases.push_back(scene(0., 0., -.04));
+  cases.push_back(scene(0., 0., .2));
+  cases.push_back(scene(0., 0., -.2));
+  cases.push_back(scene(std::tan(9. * std::acos(-1.) / 180.)));
+  for (const auto & points : cases) {
+    terrain::TerrainModel model(options());
+    ASSERT_TRUE(model.observe(points, 1.));
+    EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 1.));
+    EXPECT_FALSE(model.isMeasuredGround({.05, .05, .03}, 1.));
+    EXPECT_FALSE(model.isMeasuredGround({.05, .05, .2}, 1.));
+    EXPECT_FALSE(model.isMeasuredGround({.05, .05, -.2}, 1.));
+  }
+}
+
+TEST(MeasuredGround, FutureEvidenceExpiryClockResetAndNewInsufficientInputWithdrawProof)
+{
+  terrain::TerrainModel model(options());
+  ASSERT_TRUE(model.observe(scene(), 1.));
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, .999));
+  EXPECT_TRUE(model.isMeasuredGround({.05, .05, 0.}, 31.));
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 31.001));
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, NAN));
+  EXPECT_FALSE(model.isMeasuredGround({NAN, .05, 0.}, 1.));
+  ASSERT_FALSE(model.observe(scene(), .5));
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 1.));
+  ASSERT_TRUE(model.observe(scene(), 2.));
+  model.reset();
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 2.));
+  ASSERT_TRUE(model.observe(scene(), 3.));
+  ASSERT_TRUE(model.observe({}, 4.));
+  ASSERT_EQ(model.at({0, 0}, 4.).reason, 20);
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 4.));
+}
+
+TEST(MeasuredGround, LaterHazardAndSlopeSwitchWithdrawExistingCertificates)
+{
+  terrain::TerrainModel model(options());
+  ASSERT_TRUE(model.observe(scene(), 1.));
+  ASSERT_TRUE(model.isMeasuredGround({.05, .05, 0.}, 1.));
+  ASSERT_TRUE(model.observe(scene(0., 0., .03), 2.));
+  ASSERT_EQ(model.at({0, 0}, 2.).reason, 40);
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, .03}, 2.));
+  ASSERT_TRUE(model.observe(scene(), 3.));
+  model.setSlopeDetectionEnabled(false);
+  EXPECT_FALSE(model.isMeasuredGround({.05, .05, 0.}, 3.));
+}
+
+TEST(PointCloud, RetainedOffsetsSelectOriginalCompleteRecordsAcrossNanAndRowPadding)
+{
+  sensor_msgs::msg::PointCloud2 cloud;
+  cloud.width = 2; cloud.height = 2; cloud.point_step = 32; cloud.row_step = 80;
+  cloud.data.resize(160, 0xee);
+  for (size_t i = 0; i < 3; ++i) {
+    sensor_msgs::msg::PointField f;
+    f.name = std::array<const char *, 3>{"z", "x", "y"}[i];
+    f.offset = std::array<uint32_t, 3>{16, 8, 0}[i];
+    f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
+    cloud.fields.push_back(f);
+  }
+  const std::array<size_t, 4> positions{0, 32, 80, 112};
+  for (size_t i = 0; i < positions.size(); ++i) {
+    auto * record = cloud.data.data() + positions[i];
+    std::fill(record, record + cloud.point_step, uint8_t(10 + i));
+    const float x = float(i), y = i == 1 ? NAN : 2.f, z = i == 2 ? NAN : 3.f;
+    std::memcpy(record + 8, &x, 4); std::memcpy(record, &y, 4);
+    std::memcpy(record + 16, &z, 4);
+  }
+  std::vector<size_t> offsets{999};
+  const auto points = terrain::readPoints(cloud, &offsets);
+  ASSERT_EQ(points.size(), 2u);
+  EXPECT_EQ(points[0].x, 0.); EXPECT_EQ(points[1].x, 3.);
+  ASSERT_EQ(offsets, (std::vector<size_t>{0, 112}));
+  std::vector<uint8_t> selected;
+  for (const auto offset : offsets) {
+    selected.insert(
+      selected.end(), cloud.data.begin() + offset,
+      cloud.data.begin() + offset + cloud.point_step);
+  }
+  ASSERT_EQ(selected.size(), 64u);
+  EXPECT_EQ(std::memcmp(selected.data(), cloud.data.data(), 32), 0);
+  EXPECT_EQ(std::memcmp(selected.data() + 32, cloud.data.data() + 112, 32), 0);
+  // Auxiliary intensity/time/tag bytes survive; record offsets never name padding.
+  EXPECT_EQ(selected[4], 10); EXPECT_EQ(selected[32 + 24], 13); EXPECT_EQ(selected[63], 13);
+  cloud.is_bigendian = true;
+  EXPECT_THROW(terrain::readPoints(cloud, &offsets), std::invalid_argument);
+  EXPECT_TRUE(offsets.empty());
 }

@@ -65,6 +65,9 @@ class TerrainModel
 public:
   explicit TerrainModel(TerrainOptions options = {});
   bool observe(const std::vector<Point> & points, double stamp);
+  // Point-specific evidence in the observation frame, never an absolute Z gate.
+  // False means retain the point; local safe XY classification alone is insufficient.
+  bool isMeasuredGround(const Point & point, double acquisition_time) const;
   TerrainCell at(Key key, double now, EvidenceView view = EvidenceView::Local) const;
   // Conservative cell-area query: all overlapping source cells must be safe.
   TerrainCell area(
@@ -85,5 +88,13 @@ private:
   // Measured ground and hazards, including >= max_spread height differences.
   // Never initial assumptions; corrected by later sufficient evidence.
   std::unordered_map<Key, TerrainCell, KeyHash> retained_;
+  struct GroundCertificate
+  {
+    double a, b, c, band, stamp;
+    std::vector<std::array<double, 2>> footprint;
+  };
+  // Only the latest adopted observation's planes and closed measured XY hulls.
+  // Replaced on observe/reset; never copied into retained exploration evidence.
+  std::unordered_map<Key, GroundCertificate, KeyHash> ground_certificates_;
 };
 }  // namespace nav2_elevation_difference_costmap_plugin

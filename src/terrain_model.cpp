@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+// allow: SIZE_OK - keep the existing ordered terrain classification and edge pass together.
 #include "nav2_elevation_difference_costmap_plugin/terrain_model.hpp"
 #include <algorithm>
 #include <cmath>
@@ -54,6 +55,38 @@ std::array<std::array<double, 2>, 4> GridProjection::sourceQuad(double x, double
 }
 namespace
 {
+using Footprint = std::vector<std::array<double, 2>>;
+long double side(
+  const std::array<double, 2> & a, const std::array<double, 2> & b,
+  const std::array<double, 2> & p)
+{
+  return (static_cast<long double>(b[0]) - a[0]) *
+         (static_cast<long double>(p[1]) - a[1]) -
+         (static_cast<long double>(b[1]) - a[1]) *
+         (static_cast<long double>(p[0]) - a[0]);
+}
+Footprint convexHull(Footprint points)
+{
+  std::sort(points.begin(), points.end());
+  points.erase(std::unique(points.begin(), points.end()), points.end());
+  if (points.size() < 3) {return points;}
+  Footprint hull;
+  for (const auto & p : points) {
+    while (hull.size() > 1 && side(hull[hull.size() - 2], hull.back(), p) <= 0.) {
+      hull.pop_back();
+    }
+    hull.push_back(p);
+  }
+  const size_t lower = hull.size();
+  for (auto it = points.rbegin() + 1; it != points.rend(); ++it) {
+    while (hull.size() > lower && side(hull[hull.size() - 2], hull.back(), *it) <= 0.) {
+      hull.pop_back();
+    }
+    hull.push_back(*it);
+  }
+  hull.pop_back();
+  return hull;
+}
 struct Surface {double x, y, z, spread; unsigned count;};
 using Surfaces = std::unordered_map<Key, Surface, KeyHash>;
 struct Plane {double a, b, c; double z(double x, double y) const {return a * x + b * y + c;}};
@@ -123,10 +156,15 @@ TerrainModel::TerrainModel(TerrainOptions options)
     options.min_points < 3 || options.min_points > 10000 || options.accumulation_frames < 1 ||
     options.accumulation_frames > 20) {throw std::invalid_argument("Invalid terrain options");}
 }
-void TerrainModel::reset() {frames_.clear(); cells_.clear(); retained_.clear(); last_stamp_ = -1.;}
+void TerrainModel::reset()
+{
+  frames_.clear(); cells_.clear(); retained_.clear(); ground_certificates_.clear();
+  last_stamp_ = -1.;
+}
 void TerrainModel::setSlopeDetectionEnabled(bool enabled)
 {
   if (options_.slope_detection_enabled == enabled) {return;}
+  ground_certificates_.clear();
   options_.slope_detection_enabled = enabled;
   if (!enabled) {
     // Withdraw slope-only evidence; new observations must establish support.
@@ -139,6 +177,7 @@ void TerrainModel::setSlopeDetectionEnabled(bool enabled)
 }
 bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
 {
+  ground_certificates_.clear();
   if (!std::isfinite(stamp) || stamp <= last_stamp_ || stamp < 0 || input.size() > 1000000) {
     return false;
   }
@@ -164,12 +203,23 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
     }
   }
   Surfaces surfaces;
+  std::unordered_map<Key, Footprint, KeyHash> footprints;
   for (auto & item:buckets) {
-    const auto stats = heightStatistics(std::move(item.second.points), options_.min_points);
+    auto points = std::move(item.second.points);
+    const auto stats = heightStatistics(points, options_.min_points);
     if (!stats) {continue;}
     // XYZ must come from the same retained height interval, not the cell center.
     surfaces[item.first] = {stats->centroid.x, stats->centroid.y, stats->centroid.z,
       stats->upper - stats->lower, unsigned(stats->count)};
+    if (stats->upper - stats->lower < options_.max_spread) {
+      Footprint support;
+      for (const auto & p : points) {
+        // Include ties at the measured quantile heights; equal-height spatial
+        // extremes must not depend on the height sort's arbitrary tie order.
+        if (p.z >= stats->lower && p.z <= stats->upper) {support.push_back({p.x, p.y});}
+      }
+      footprints[item.first] = convexHull(std::move(support));
+    }
   }
   const auto neighborhood = [&](Key key, int axis, int side) {
       std::vector<Surface> rows;
@@ -201,6 +251,7 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
           neighbors.begin(), neighbors.end(), [&s](const Surface & p) {
             return p.x == s.x && p.y == s.y;
           }), neighbors.end());
+      const bool independent = neighbors.size() >= 6;
       // When enough surrounding cells exist, the tested low obstacle must not
       // pull its own reference ground plane upward and hide a threshold step.
       if (neighbors.size() < 6) {neighbors = neighborhood(key, -1, 0);}
@@ -213,7 +264,22 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
             fitted.b) > std::tan(options_.max_slope_deg * std::acos(-1.) / 180.) + 1e-8)
         {
           cell = {254, 60, stamp};
-        } else {cell = {0, 20, stamp};}
+        } else {
+          cell = {0, 20, stamp};
+          if (independent) {
+            // Worst measured plane discrepancy plus the entire quantile spread
+            // consumes the point residual budget. No trimmed point inherits it.
+            double uncertainty = std::abs(s.z - fitted.z(s.x, s.y)) + s.spread;
+            for (const auto & p : neighbors) {
+              uncertainty = std::max(
+                uncertainty, std::abs(p.z - fitted.z(p.x, p.y)) + p.spread);
+            }
+            const double band = std::min(.015, options_.step_height / 2.) - uncertainty;
+            if (band > 0.) {
+              ground_certificates_[key] = {fitted.a, fitted.b, fitted.c, band, stamp, {}};
+            }
+          }
+        }
       }
     }
     evaluated[key] = cell;
@@ -243,6 +309,27 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
       }
     }
   }
+  // Final edge comparisons can revoke safe cells after their independent fit.
+  // Spatial support includes own measured points, but never the own cell in
+  // the independent plane fit. Merge cached cell hulls, never whole buckets.
+  for (auto it = ground_certificates_.begin(); it != ground_certificates_.end(); ) {
+    const auto & cell = evaluated.at(it->first);
+    if (cell.cost != 0 || cell.reason != 20) {it = ground_certificates_.erase(it); continue;}
+    Footprint support;
+    const auto & own = surfaces.at(it->first);
+    for (int dy = -2; dy <= 2; ++dy) {
+      for (int dx = -2; dx <= 2; ++dx) {
+        const Key key{it->first.x + dx, it->first.y + dy};
+        const auto found = footprints.find(key);
+        if (found == footprints.end()) {continue;}
+        const auto & measured = surfaces.at(key);
+        if (!(key == it->first) && measured.x == own.x && measured.y == own.y) {continue;}
+        support.insert(support.end(), found->second.begin(), found->second.end());
+      }
+    }
+    it->second.footprint = convexHull(std::move(support));
+    if (it->second.footprint.size() < 3) {it = ground_certificates_.erase(it);} else {++it;}
+  }
   for (auto it = cells_.begin(); it != cells_.end(); ) {
     if ((it->second.cost == 0 || it->second.reason == 30) &&
       stamp - it->second.stamp > options_.safe_lifetime)
@@ -268,6 +355,31 @@ bool TerrainModel::observe(const std::vector<Point> & input, double stamp)
     }
   }
   last_stamp_ = stamp;
+  return true;
+}
+bool TerrainModel::isMeasuredGround(const Point & point, double acquisition_time) const
+{
+  if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) ||
+    std::abs(point.x) >= 1e5 || std::abs(point.y) >= 1e5 || std::abs(point.z) >= 1e4 ||
+    !std::isfinite(acquisition_time)) {return false;}
+  const Key key{int(std::floor(point.x / options_.resolution)),
+    int(std::floor(point.y / options_.resolution))};
+  const auto found = ground_certificates_.find(key);
+  if (found == ground_certificates_.end()) {return false;}
+  const auto & proof = found->second;
+  if (proof.stamp != last_stamp_ || acquisition_time < proof.stamp ||
+    acquisition_time - proof.stamp > options_.safe_lifetime) {return false;}
+  const auto cell = at(key, acquisition_time);
+  if (cell.cost != 0 || cell.reason != 20 || cell.stamp != proof.stamp ||
+    std::abs(point.z - (proof.a * point.x + proof.b * point.y + proof.c)) >= proof.band)
+  {
+    return false;
+  }
+  for (size_t i = 0; i < proof.footprint.size(); ++i) {
+    if (side(
+        proof.footprint[i], proof.footprint[(i + 1) % proof.footprint.size()],
+        {point.x, point.y}) < 0.) {return false;}
+  }
   return true;
 }
 TerrainCell TerrainModel::at(Key key, double now, EvidenceView view) const

@@ -29,6 +29,19 @@ Horizonにも接続できる。実機走行は未検証。
 斜面判定は`slope_detection_enabled`（既定true）で実行中も切替可能。
 適用時期・保持cacheの扱いは[統合仕様](docs/ROBUST_ELEVATION_INTEGRATION_JA.md)を参照。
 
+共通API `TerrainModel::isMeasuredGround(point, acquisition_time)` は、同じ観測frameの
+個々の点が実測近傍平面に十分近い場合だけtrueを返す。安全なXYセルだけを理由に
+点を除去しない。絶対zやSLAM地図を地面基準に使わず、30mmの疎な外れ点も保持する。
+独立近傍・実測点の閉凸包支持・残差予算・有効時刻の条件と証拠の限界は
+[点単位の地面証拠](docs/ROBUST_ELEVATION_INTEGRATION_JA.md#点単位の地面証拠2026-11-16)を参照。
+観測領域の境界点も実測支持の内側・境界上なら照会できる。未観測セルや
+実測凸包外の点を、安全なXYセルだけを理由に地面にすることはない。
+
+`readPoints(cloud, &record_offsets)` は有限XYZと同じ順序で元PointCloud2の
+各record先頭byte offsetを返す。省略時は従来どおりXYZだけを返す。
+利用側はoffsetから`point_step` bytesをコピーすることで、強度・時刻・tag等の
+元recordを保持できる。入力headerやXYZの付け替えは行わない。
+
 ## Nav2 layerとしての使用
 
 ```yaml

@@ -9,8 +9,11 @@
 
 namespace nav2_elevation_difference_costmap_plugin
 {
-inline std::vector<Point> readPoints(const sensor_msgs::msg::PointCloud2 & cloud)
+inline std::vector<Point> readPoints(
+  const sensor_msgs::msg::PointCloud2 & cloud,
+  std::vector<size_t> * record_offsets = nullptr)
 {
+  if (record_offsets) {record_offsets->clear();}
   if (cloud.is_bigendian || !cloud.point_step || cloud.point_step > 1024 ||
     uint64_t(cloud.width) * cloud.height > 1000000 ||
     cloud.row_step < uint64_t(cloud.point_step) * cloud.width ||
@@ -45,6 +48,9 @@ inline std::vector<Point> readPoints(const sensor_msgs::msg::PointCloud2 & cloud
       }
       if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2])) {
         result.push_back({p[0], p[1], p[2]});
+        if (record_offsets) {
+          record_offsets->push_back(row * cloud.row_step + col * cloud.point_step);
+        }
       }
     }
   }
